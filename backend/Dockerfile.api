@@ -1,0 +1,15 @@
+FROM golang:1.21-alpine AS build
+WORKDIR /app
+COPY go.mod ./
+RUN go mod download || true
+COPY . .
+RUN go mod tidy && go build -o /api ./cmd/api
+
+FROM alpine:3.19
+WORKDIR /app
+RUN apk add --no-cache ffmpeg ca-certificates
+COPY --from=build /api /app/api
+COPY migrations /app/migrations
+ENV MIGRATIONS_DIR=/app/migrations
+EXPOSE 8080
+CMD ["/app/api"]

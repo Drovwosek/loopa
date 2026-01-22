@@ -1,15 +1,29 @@
 # Loopa
 
-A new project.
+MVP: upload audio/video, process asynchronously, show transcript, export TXT/DOCX,
+and keep a per-session history.
 
-## Getting Started
+## Repository Layout
 
-This project is just getting started. More information coming soon!
+- `frontend/` React + Redux Toolkit UI.
+- `backend/` Go API and worker.
+- `infra/` Docker Compose for local dev.
 
-## Development
+## Quick Start (Local)
 
-Instructions for development will be added here.
+1. Install Docker + Docker Compose and `ffmpeg` on the host.
+2. Run: `docker compose -f infra/docker-compose.yml up --build`
+3. Open `http://localhost:5173`
 
+## Env Vars
+
+Backend/Worker:
+
+- `DB_DSN` (default: `root:root@tcp(mysql:3306)/loopa?parseTime=true`)
+- `UPLOAD_DIR` (default: `/data/uploads`)
+- `MAX_UPLOAD_BYTES` (default: `1073741824`)
+- `MOCK_DELAY_MS` (default: `2000`)
+ 
 ## License
 
 TBD
