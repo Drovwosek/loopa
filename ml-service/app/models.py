@@ -30,3 +30,27 @@ class TextSegment(BaseModel):
 class TextProcessResponse(BaseModel):
     segments: list[TextSegment]
     total_fillers: int
+
+
+class WordTimestamp(BaseModel):
+    word: str
+    start: float
+    end: float
+
+
+class TranscribeSegment(BaseModel):
+    speaker: str
+    start: float
+    end: float
+    text: str
+    words: list[WordTimestamp]
+    has_fillers: bool
+    fillers_found: list[str]
+
+
+class TranscribeFullResponse(BaseModel):
+    language: str
+    full_text: str
+    segments: list[TranscribeSegment]
+    num_speakers: int
+    processing_time_seconds: float

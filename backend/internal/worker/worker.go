@@ -44,14 +44,20 @@ type Worker struct {
 	mlClient     *mlclient.Client
 	s3Client     *storage.S3Client
 	uploadDir    string
+	provider     string // "whisper" или "speechkit"
 	pollInterval time.Duration
 }
 
 // New создаёт worker.
-func New(db *sql.DB, apiKey string, folderId string, uploadDir string, mlServiceURL string, s3cfg *S3Config) *Worker {
+func New(db *sql.DB, provider string, apiKey string, folderId string, uploadDir string, mlServiceURL string, s3cfg *S3Config) *Worker {
 	var ml *mlclient.Client
 	if mlServiceURL != "" {
 		ml = mlclient.New(mlServiceURL)
+	}
+
+	var sk *speechkit.Client
+	if provider == "speechkit" {
+		sk = speechkit.NewClient(apiKey, folderId)
 	}
 
 	var s3c *storage.S3Client
@@ -67,10 +73,11 @@ func New(db *sql.DB, apiKey string, folderId string, uploadDir string, mlService
 
 	return &Worker{
 		db:           db,
-		speechKit:    speechkit.NewClient(apiKey, folderId),
+		speechKit:    sk,
 		mlClient:     ml,
 		s3Client:     s3c,
 		uploadDir:    uploadDir,
+		provider:     provider,
 		pollInterval: 2 * time.Second,
 	}
 }
@@ -139,14 +146,73 @@ func (w *Worker) processTask(task TaskRow) error {
 		return nil
 	}
 
-	// StoragePath уже содержит полный путь к файлу
+	if w.provider == "whisper" {
+		return w.processTaskWhisper(task, startTime)
+	}
+	return w.processTaskSpeechKit(task, startTime)
+}
+
+// processTaskWhisper — pipeline через Faster-Whisper (ML-сервис /transcribe-full).
+func (w *Worker) processTaskWhisper(task TaskRow, startTime time.Time) error {
+	inputPath := task.StoragePath
+
+	if w.mlClient == nil {
+		return w.failTask(task.ID, "ML-сервис не настроен для Whisper провайдера")
+	}
+
+	log.Printf("task %s: starting Whisper transcription", task.ID)
+
+	resp, err := w.mlClient.TranscribeFull(inputPath, "", nil, true)
+	if err != nil {
+		return w.failTask(task.ID, "Ошибка транскрибации: "+err.Error())
+	}
+
+	log.Printf("task %s: transcription done — %d segments, %d speakers, lang=%s (%.1fs)",
+		task.ID, len(resp.Segments), resp.NumSpeakers, resp.Language, resp.ProcessingTimeSeconds)
+
+	// Сохраняем данные о спикерах
+	speakerJSON, _ := json.Marshal(resp)
+	w.db.Exec(
+		`UPDATE transcription_tasks SET speaker_data = ? WHERE id = ?`,
+		string(speakerJSON), task.ID,
+	)
+
+	// Сохраняем сегменты с точным word-level alignment
+	now := time.Now().UTC()
+	for _, seg := range resp.Segments {
+		segID := uuid.New().String()
+		startMs := int(seg.Start * 1000)
+		endMs := int(seg.End * 1000)
+
+		w.db.Exec(
+			`INSERT INTO transcription_segments
+			 (id, task_id, speaker_id, start_time, end_time, text, has_fillers, created_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+			segID, task.ID, seg.Speaker, startMs, endMs, seg.Text, seg.HasFillers, now,
+		)
+	}
+
+	processingTime := int(time.Since(startTime).Seconds())
+
+	_, err = w.db.Exec(
+		`UPDATE transcription_tasks
+		 SET status = 'готово', transcript_text = ?, provider = 'faster_whisper',
+		     processing_time = ?, completed_at = ?
+		 WHERE id = ?`,
+		resp.FullText, processingTime, time.Now().UTC(), task.ID,
+	)
+	return err
+}
+
+// processTaskSpeechKit — pipeline через Yandex SpeechKit (legacy fallback).
+func (w *Worker) processTaskSpeechKit(task TaskRow, startTime time.Time) error {
 	inputPath := task.StoragePath
 
 	// Определяем длительность аудио
 	duration, err := media.GetDuration(inputPath)
 	if err != nil {
 		log.Printf("task %s: failed to get duration, using async mode: %v", task.ID, err)
-		duration = maxSyncDuration + 1 // Используем async если не можем определить
+		duration = maxSyncDuration + 1
 	}
 
 	// Конвертируем аудио в OGG Opus для SpeechKit
@@ -156,7 +222,7 @@ func (w *Worker) processTask(task TaskRow) error {
 	}
 	defer os.Remove(oggPath)
 
-	// Шаг 1: Транскрибация через SpeechKit
+	// Транскрибация через SpeechKit
 	var text string
 	if duration <= maxSyncDuration {
 		text, err = w.speechKit.RecognizeFile(oggPath, "ru-RU")
@@ -170,7 +236,7 @@ func (w *Worker) processTask(task TaskRow) error {
 		return w.failTask(task.ID, "Ошибка распознавания: "+err.Error())
 	}
 
-	// Шаг 2: Диаризация через ML-сервис (если доступен)
+	// Диаризация через ML-сервис (если доступен)
 	if w.mlClient != nil {
 		w.diarizeAndSaveSegments(task.ID, oggPath, text)
 	}
@@ -187,14 +253,13 @@ func (w *Worker) processTask(task TaskRow) error {
 	return err
 }
 
-// diarizeAndSaveSegments выполняет диаризацию и сохраняет сегменты.
+// diarizeAndSaveSegments выполняет диаризацию и сохраняет сегменты (для SpeechKit pipeline).
 func (w *Worker) diarizeAndSaveSegments(taskID, audioPath, transcriptText string) {
 	log.Printf("task %s: starting diarization", taskID)
 
 	diarization, err := w.mlClient.Diarize(audioPath)
 	if err != nil {
 		log.Printf("task %s: diarization failed (non-fatal): %v", taskID, err)
-		// Сохраняем весь текст как один сегмент без спикера
 		w.saveSingleSegment(taskID, transcriptText)
 		return
 	}
@@ -202,14 +267,12 @@ func (w *Worker) diarizeAndSaveSegments(taskID, audioPath, transcriptText string
 	log.Printf("task %s: diarization found %d speakers, %d segments",
 		taskID, diarization.NumSpeakers, len(diarization.Segments))
 
-	// Сохраняем данные о спикерах
 	speakerJSON, _ := json.Marshal(diarization)
 	w.db.Exec(
 		`UPDATE transcription_tasks SET speaker_data = ? WHERE id = ?`,
 		string(speakerJSON), taskID,
 	)
 
-	// Обработка текста через ML-сервис (определение паразитов)
 	var textProcessed *mlclient.TextProcessResponse
 	if w.mlClient != nil {
 		textProcessed, err = w.mlClient.ProcessText(transcriptText, true, false)
@@ -218,17 +281,27 @@ func (w *Worker) diarizeAndSaveSegments(taskID, audioPath, transcriptText string
 		}
 	}
 
-	// Создаём сегменты на основе диаризации
 	now := time.Now().UTC()
-	for _, seg := range diarization.Segments {
+	words := strings.Fields(transcriptText)
+	totalWords := len(words)
+	numSegments := len(diarization.Segments)
+
+	for i, seg := range diarization.Segments {
 		segID := uuid.New().String()
 		startMs := int(seg.Start * 1000)
 		endMs := int(seg.End * 1000)
 
-		// Определяем текст для сегмента (упрощённая логика — весь текст)
-		segText := extractTextForTimeRange(transcriptText, len(diarization.Segments))
+		// Распределяем слова пропорционально по сегментам
+		segStart := i * totalWords / numSegments
+		segEnd := (i + 1) * totalWords / numSegments
+		if segEnd > totalWords {
+			segEnd = totalWords
+		}
+		segText := ""
+		if segStart < segEnd {
+			segText = strings.Join(words[segStart:segEnd], " ")
+		}
 
-		// Определяем наличие паразитов
 		hasFillers := false
 		if textProcessed != nil && len(textProcessed.Segments) > 0 {
 			hasFillers = textProcessed.Segments[0].HasFillers
@@ -248,7 +321,6 @@ func (w *Worker) saveSingleSegment(taskID, text string) {
 	now := time.Now().UTC()
 	segID := uuid.New().String()
 
-	// Проверяем паразиты через ML-сервис
 	hasFillers := false
 	if w.mlClient != nil {
 		resp, err := w.mlClient.ProcessText(text, true, false)
@@ -265,29 +337,6 @@ func (w *Worker) saveSingleSegment(taskID, text string) {
 	)
 }
 
-// extractTextForTimeRange — упрощённая логика разбиения текста по сегментам.
-// В реальной системе нужно использовать word-level timestamps от SpeechKit.
-func extractTextForTimeRange(fullText string, numSegments int) string {
-	if numSegments <= 1 {
-		return fullText
-	}
-	words := strings.Fields(fullText)
-	if len(words) == 0 {
-		return ""
-	}
-	// Равномерно распределяем слова по сегментам
-	wordsPerSegment := len(words) / numSegments
-	if wordsPerSegment < 1 {
-		wordsPerSegment = 1
-	}
-	// Возвращаем первую порцию (каждый вызов получит одинаковый текст — это упрощение)
-	end := wordsPerSegment
-	if end > len(words) {
-		end = len(words)
-	}
-	return strings.Join(words[:end], " ")
-}
-
 // recognizeLongAudioAsync загружает файл в S3 и использует async SpeechKit API.
 func (w *Worker) recognizeLongAudioAsync(taskID, oggPath string) (string, error) {
 	log.Printf("task %s: uploading to S3 for async recognition", taskID)
@@ -300,7 +349,6 @@ func (w *Worker) recognizeLongAudioAsync(taskID, oggPath string) (string, error)
 		return "", fmt.Errorf("S3 upload failed: %w", err)
 	}
 
-	// Удаляем из S3 после распознавания
 	defer func() {
 		if delErr := w.s3Client.Delete(ctx, key); delErr != nil {
 			log.Printf("task %s: failed to delete S3 object: %v", taskID, delErr)
@@ -320,13 +368,11 @@ func (w *Worker) recognizeLongAudioAsync(taskID, oggPath string) (string, error)
 func (w *Worker) recognizeLongAudio(taskID, inputPath string) (string, error) {
 	log.Printf("task %s: splitting long audio into chunks", taskID)
 
-	// Разбиваем на части по 29 секунд
 	chunks, err := media.SplitAudio(inputPath, w.uploadDir, chunkDuration)
 	if err != nil {
 		return "", err
 	}
 
-	// Удаляем временные файлы после обработки
 	defer func() {
 		for _, chunk := range chunks {
 			os.Remove(chunk)
@@ -335,7 +381,6 @@ func (w *Worker) recognizeLongAudio(taskID, inputPath string) (string, error) {
 
 	log.Printf("task %s: processing %d chunks", taskID, len(chunks))
 
-	// Распознаём каждую часть
 	var results []string
 	for i, chunk := range chunks {
 		log.Printf("task %s: recognizing chunk %d/%d", taskID, i+1, len(chunks))

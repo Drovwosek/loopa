@@ -47,11 +47,35 @@ type TextProcessRequest struct {
 	RemoveFillers bool   `json:"remove_fillers"`
 }
 
+type WordTimestamp struct {
+	Word  string  `json:"word"`
+	Start float64 `json:"start"`
+	End   float64 `json:"end"`
+}
+
+type TranscribeSegment struct {
+	Speaker      string          `json:"speaker"`
+	Start        float64         `json:"start"`
+	End          float64         `json:"end"`
+	Text         string          `json:"text"`
+	Words        []WordTimestamp  `json:"words"`
+	HasFillers   bool            `json:"has_fillers"`
+	FillersFound []string        `json:"fillers_found"`
+}
+
+type TranscribeFullResponse struct {
+	Language              string              `json:"language"`
+	FullText              string              `json:"full_text"`
+	Segments              []TranscribeSegment `json:"segments"`
+	NumSpeakers           int                 `json:"num_speakers"`
+	ProcessingTimeSeconds float64             `json:"processing_time_seconds"`
+}
+
 func New(baseURL string) *Client {
 	return &Client{
 		baseURL: baseURL,
 		httpClient: &http.Client{
-			Timeout: 10 * time.Minute,
+			Timeout: 30 * time.Minute,
 		},
 	}
 }
@@ -141,6 +165,64 @@ func (c *Client) ProcessText(text string, detectFillers, removeFillers bool) (*T
 	var result TextProcessResponse
 	if err := json.Unmarshal(respBody, &result); err != nil {
 		return nil, fmt.Errorf("parse response: %w", err)
+	}
+
+	return &result, nil
+}
+
+// TranscribeFull отправляет аудиофайл на полный pipeline: транскрибация + диаризация + alignment.
+func (c *Client) TranscribeFull(audioPath string, language string, numSpeakers *int, detectFillers bool) (*TranscribeFullResponse, error) {
+	body := &bytes.Buffer{}
+	writer := multipart.NewWriter(body)
+
+	file, err := os.Open(audioPath)
+	if err != nil {
+		return nil, fmt.Errorf("open audio file: %w", err)
+	}
+	defer file.Close()
+
+	part, err := writer.CreateFormFile("audio", filepath.Base(audioPath))
+	if err != nil {
+		return nil, fmt.Errorf("create form file: %w", err)
+	}
+	if _, err := io.Copy(part, file); err != nil {
+		return nil, fmt.Errorf("copy audio data: %w", err)
+	}
+	writer.Close()
+
+	// Формируем URL с query-параметрами
+	url := c.baseURL + "/transcribe-full?detect_fillers=" + fmt.Sprintf("%t", detectFillers)
+	if language != "" {
+		url += "&language=" + language
+	}
+	if numSpeakers != nil {
+		url += "&num_speakers=" + fmt.Sprintf("%d", *numSpeakers)
+	}
+
+	req, err := http.NewRequest(http.MethodPost, url, body)
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("transcribe-full request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("transcribe-full error: status %d, body: %s", resp.StatusCode, string(respBody))
+	}
+
+	var result TranscribeFullResponse
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return nil, fmt.Errorf("parse transcribe-full response: %w", err)
 	}
 
 	return &result, nil

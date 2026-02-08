@@ -39,10 +39,11 @@ services:
     environment:
       DB_DSN: root:root@tcp(mysql:3306)/loopa?parseTime=true&multiStatements=true
       UPLOAD_DIR: /data/uploads
-      YANDEX_SPEECHKIT_API_KEY: ${YANDEX_SPEECHKIT_API_KEY}
-      YANDEX_FOLDER_ID: ${YANDEX_FOLDER_ID}
+      TRANSCRIPTION_PROVIDER: ${TRANSCRIPTION_PROVIDER:-whisper}
       ML_SERVICE_URL: http://ml-service:8001
-      # Опционально: для аудио длиннее 30 сек
+      # Yandex SpeechKit (только при TRANSCRIPTION_PROVIDER=speechkit)
+      YANDEX_SPEECHKIT_API_KEY: ${YANDEX_SPEECHKIT_API_KEY:-}
+      YANDEX_FOLDER_ID: ${YANDEX_FOLDER_ID:-}
       YANDEX_STORAGE_ACCESS_KEY: ${YANDEX_STORAGE_ACCESS_KEY:-}
       YANDEX_STORAGE_SECRET_KEY: ${YANDEX_STORAGE_SECRET_KEY:-}
       YANDEX_STORAGE_BUCKET: ${YANDEX_STORAGE_BUCKET:-}
@@ -61,12 +62,22 @@ services:
       dockerfile: Dockerfile
     environment:
       HF_TOKEN: ${HF_TOKEN:-}
-      DEVICE: cpu
+      DEVICE: ${DEVICE:-cuda}
+      WHISPER_MODEL: ${WHISPER_MODEL:-large-v3}
+      WHISPER_DEVICE: ${WHISPER_DEVICE:-cuda}
+      WHISPER_COMPUTE_TYPE: ${WHISPER_COMPUTE_TYPE:-float16}
     ports:
       - "8001:8001"
     volumes:
       - model_cache:/root/.cache
     restart: on-failure
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
 
   frontend:
     build:

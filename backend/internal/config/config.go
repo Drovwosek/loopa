@@ -9,6 +9,7 @@ type Config struct {
 	DBDSN                  string
 	UploadDir              string
 	MaxUploadBytes         int64
+	TranscriptionProvider  string // "whisper" (default) или "speechkit"
 	YandexSpeechKitAPIKey  string
 	YandexFolderId         string
 	// Yandex Object Storage для длинных аудио
@@ -24,6 +25,7 @@ func Load() Config {
 		DBDSN:                  getEnv("DB_DSN", "root:root@tcp(mysql:3306)/loopa?parseTime=true"),
 		UploadDir:              getEnv("UPLOAD_DIR", "/data/uploads"),
 		MaxUploadBytes:         getEnvInt64("MAX_UPLOAD_BYTES", 1073741824),
+		TranscriptionProvider:  getEnv("TRANSCRIPTION_PROVIDER", "whisper"),
 		YandexSpeechKitAPIKey:  getEnv("YANDEX_SPEECHKIT_API_KEY", ""),
 		YandexFolderId:         getEnv("YANDEX_FOLDER_ID", ""),
 		YandexStorageAccessKey: getEnv("YANDEX_STORAGE_ACCESS_KEY", ""),

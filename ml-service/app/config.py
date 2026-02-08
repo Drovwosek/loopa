@@ -8,6 +8,9 @@ class Settings(BaseSettings):
     DIARIZATION_MODEL: str = "pyannote/speaker-diarization-3.1"
     HOST: str = "0.0.0.0"
     PORT: int = 8001
+    WHISPER_MODEL: str = "large-v3"
+    WHISPER_DEVICE: str = "cuda"
+    WHISPER_COMPUTE_TYPE: str = "float16"
 
     class Config:
         env_file = ".env"
