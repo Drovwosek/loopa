@@ -1,37 +1,38 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { deleteTask, uploadFile } from "../api";
+import { Row, Col, Table, Button, Alert, Space, Popconfirm, Select } from "antd";
+import { DeleteOutlined, EyeOutlined } from "@ant-design/icons";
+import { deleteTask, uploadFile, fetchProjects } from "../api";
 import { useAppDispatch, useAppSelector } from "../hooks";
 import { loadHistory } from "../store/historySlice";
+import FileUpload from "../components/upload/FileUpload";
+import StatusTag from "../components/common/StatusTag";
+import type { HistoryItem } from "../api";
+import type { Project } from "../types";
 
 export default function HomePage() {
   const dispatch = useAppDispatch();
   const navigate = useNavigate();
   const history = useAppSelector((state) => state.history.items);
   const loading = useAppSelector((state) => state.history.loading);
-  const [file, setFile] = useState<File | null>(null);
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [dragOver, setDragOver] = useState(false);
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [selectedProjectId, setSelectedProjectId] = useState<string | undefined>();
 
   useEffect(() => {
     dispatch(loadHistory());
+    fetchProjects().then(setProjects).catch(() => {});
   }, [dispatch]);
 
-  const fileName = useMemo(() => file?.name ?? "No file selected", [file]);
-
-  const handleUpload = async () => {
-    if (!file) {
-      setError("Select a file first.");
-      return;
-    }
+  const handleUpload = async (file: File) => {
     setUploading(true);
     setError(null);
     try {
-      const taskId = await uploadFile(file);
+      const taskId = await uploadFile(file, selectedProjectId);
       navigate(`/tasks/${taskId}`);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Upload failed");
+      setError(err instanceof Error ? err.message : "Ошибка загрузки");
     } finally {
       setUploading(false);
     }
@@ -42,86 +43,91 @@ export default function HomePage() {
       await deleteTask(taskId);
       dispatch(loadHistory());
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Delete failed");
+      setError(err instanceof Error ? err.message : "Ошибка удаления");
     }
   };
 
-  const onDrop = (event: React.DragEvent<HTMLDivElement>) => {
-    event.preventDefault();
-    setDragOver(false);
-    const dropped = event.dataTransfer.files[0];
-    if (dropped) {
-      setFile(dropped);
-    }
-  };
+  const columns = [
+    {
+      title: "Файл",
+      dataIndex: "originalName",
+      key: "originalName",
+    },
+    {
+      title: "Статус",
+      dataIndex: "status",
+      key: "status",
+      render: (status: string) => <StatusTag status={status} />,
+    },
+    {
+      title: "Загружен",
+      dataIndex: "uploadedAt",
+      key: "uploadedAt",
+      render: (date: string) => new Date(date).toLocaleString(),
+    },
+    {
+      title: "Действия",
+      key: "actions",
+      render: (_: unknown, record: HistoryItem) => (
+        <Space>
+          <Button
+            size="small"
+            icon={<EyeOutlined />}
+            onClick={() => navigate(`/tasks/${record.id}`)}
+          >
+            Открыть
+          </Button>
+          <Popconfirm
+            title="Удалить задачу?"
+            onConfirm={() => handleDelete(record.id)}
+          >
+            <Button size="small" danger icon={<DeleteOutlined />}>
+              Удалить
+            </Button>
+          </Popconfirm>
+        </Space>
+      ),
+    },
+  ];
 
   return (
-    <div>
-      <section
-        onDragOver={(event) => {
-          event.preventDefault();
-          setDragOver(true);
-        }}
-        onDragLeave={() => setDragOver(false)}
-        onDrop={onDrop}
-        style={{
-          border: `2px dashed ${dragOver ? "#333" : "#999"}`,
-          padding: 24,
-          borderRadius: 8,
-          marginBottom: 24,
-        }}
-      >
-        <h2>Upload media</h2>
-        <p>MP3, WAV, MP4, MOV up to 1GB</p>
-        <input
-          type="file"
-          accept=".mp3,.wav,.mp4,.mov,audio/*,video/*"
-          onChange={(event) => setFile(event.target.files?.[0] ?? null)}
-        />
-        <p style={{ marginTop: 8 }}>{fileName}</p>
-        <button onClick={handleUpload} disabled={uploading}>
-          {uploading ? "Uploading..." : "Upload"}
-        </button>
-        {error && <p style={{ color: "crimson" }}>{error}</p>}
-      </section>
-
-      <section>
-        <h2>Recent uploads</h2>
-        {loading ? (
-          <p>Loading...</p>
-        ) : history.length === 0 ? (
-          <p>No uploads yet.</p>
-        ) : (
-          <table style={{ width: "100%", borderCollapse: "collapse" }}>
-            <thead>
-              <tr>
-                <th style={{ textAlign: "left" }}>File</th>
-                <th style={{ textAlign: "left" }}>Status</th>
-                <th style={{ textAlign: "left" }}>Uploaded</th>
-                <th />
-              </tr>
-            </thead>
-            <tbody>
-              {history.map((item) => (
-                <tr key={item.id}>
-                  <td>{item.originalName}</td>
-                  <td>{item.status}</td>
-                  <td>{new Date(item.uploadedAt).toLocaleString()}</td>
-                  <td>
-                    <button
-                      onClick={() => navigate(`/tasks/${item.id}`)}
-                      style={{ marginRight: 8 }}
-                    >
-                      Open
-                    </button>
-                    <button onClick={() => handleDelete(item.id)}>Delete</button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+    <Row gutter={[24, 24]}>
+      <Col xs={24} lg={12}>
+        {projects.length > 0 && (
+          <div style={{ marginBottom: 12 }}>
+            <Select
+              placeholder="Проект (необязательно)"
+              allowClear
+              style={{ width: "100%" }}
+              value={selectedProjectId}
+              onChange={setSelectedProjectId}
+              options={projects.map((p) => ({ label: p.name, value: p.id }))}
+            />
+          </div>
         )}
-      </section>
-    </div>
+        <FileUpload onUploadStart={handleUpload} uploading={uploading} />
+        {error && (
+          <Alert
+            title={error}
+            type="error"
+            closable
+            onClose={() => setError(null)}
+            style={{ marginTop: 16 }}
+          />
+        )}
+      </Col>
+      <Col xs={24} lg={12}>
+        <Table
+          dataSource={history}
+          columns={columns}
+          rowKey="id"
+          loading={loading}
+          pagination={false}
+          size="small"
+          title={() => <strong>Последние загрузки</strong>}
+          locale={{ emptyText: "Нет загрузок" }}
+        />
+      </Col>
+    </Row>
   );
 }

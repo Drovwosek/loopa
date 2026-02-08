@@ -15,6 +15,8 @@ type Config struct {
 	YandexStorageAccessKey string
 	YandexStorageSecretKey string
 	YandexStorageBucket    string
+	// ML-сервис
+	MLServiceURL string
 }
 
 func Load() Config {
@@ -27,6 +29,7 @@ func Load() Config {
 		YandexStorageAccessKey: getEnv("YANDEX_STORAGE_ACCESS_KEY", ""),
 		YandexStorageSecretKey: getEnv("YANDEX_STORAGE_SECRET_KEY", ""),
 		YandexStorageBucket:    getEnv("YANDEX_STORAGE_BUCKET", ""),
+		MLServiceURL:           getEnv("ML_SERVICE_URL", "http://ml-service:8001"),
 	}
 }
 

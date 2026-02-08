@@ -41,12 +41,25 @@ func main() {
 		log.Fatalf("migration failed: %v", err)
 	}
 
-	w := worker.New(conn, cfg.YandexSpeechKitAPIKey, cfg.YandexFolderId, cfg.UploadDir)
+	var s3cfg *worker.S3Config
+	if cfg.HasObjectStorage() {
+		s3cfg = &worker.S3Config{
+			AccessKey: cfg.YandexStorageAccessKey,
+			SecretKey: cfg.YandexStorageSecretKey,
+			Bucket:    cfg.YandexStorageBucket,
+		}
+	}
+
+	w := worker.New(conn, cfg.YandexSpeechKitAPIKey, cfg.YandexFolderId, cfg.UploadDir, cfg.MLServiceURL, s3cfg)
 
 	stop := make(chan struct{})
 	go w.Run(stop)
 
-	log.Println("Worker started with Yandex SpeechKit (chunked mode for long audio)")
+	if s3cfg != nil {
+		log.Println("Worker started with Yandex SpeechKit (async mode for long audio)")
+	} else {
+		log.Println("Worker started with Yandex SpeechKit (chunked mode for long audio)")
+	}
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)

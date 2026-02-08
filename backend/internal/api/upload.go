@@ -31,6 +31,7 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 		storagePath  string
 		fileID       string
 		fileSize     int64
+		projectID    string
 	)
 
 	for {
@@ -42,6 +43,15 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "invalid multipart stream")
 			return
 		}
+
+		// Читаем project_id из формы
+		if part.FormName() == "projectId" {
+			data, _ := io.ReadAll(part)
+			_ = part.Close()
+			projectID = strings.TrimSpace(string(data))
+			continue
+		}
+
 		if part.FormName() != "file" || part.FileName() == "" {
 			_ = part.Close()
 			continue
@@ -92,10 +102,17 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	now := time.Now().UTC()
+
+	// project_id — NULL если не указан
+	var projectIDParam interface{}
+	if projectID != "" {
+		projectIDParam = projectID
+	}
+
 	_, err = s.db.Exec(
-		`INSERT INTO files (id, original_name, storage_path, file_size, mime_type, uploaded_at, user_session_id)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		fileID, originalName, storagePath, fileSize, mimeType, now, sessionID,
+		`INSERT INTO files (id, original_name, storage_path, file_size, mime_type, uploaded_at, user_session_id, project_id)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		fileID, originalName, storagePath, fileSize, mimeType, now, sessionID, projectIDParam,
 	)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to store file metadata")

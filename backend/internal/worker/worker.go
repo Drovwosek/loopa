@@ -1,14 +1,22 @@
 package worker
 
 import (
+	"context"
 	"database/sql"
+	"encoding/json"
+	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
+
 	"loopa/backend/internal/media"
+	"loopa/backend/internal/mlclient"
 	"loopa/backend/internal/speechkit"
+	"loopa/backend/internal/storage"
 )
 
 const (
@@ -23,18 +31,45 @@ type TaskRow struct {
 	StoragePath string
 }
 
+// S3Config содержит настройки Yandex Object Storage для async API.
+type S3Config struct {
+	AccessKey string
+	SecretKey string
+	Bucket    string
+}
+
 type Worker struct {
 	db           *sql.DB
 	speechKit    *speechkit.Client
+	mlClient     *mlclient.Client
+	s3Client     *storage.S3Client
 	uploadDir    string
 	pollInterval time.Duration
 }
 
 // New создаёт worker.
-func New(db *sql.DB, apiKey string, folderId string, uploadDir string) *Worker {
+func New(db *sql.DB, apiKey string, folderId string, uploadDir string, mlServiceURL string, s3cfg *S3Config) *Worker {
+	var ml *mlclient.Client
+	if mlServiceURL != "" {
+		ml = mlclient.New(mlServiceURL)
+	}
+
+	var s3c *storage.S3Client
+	if s3cfg != nil {
+		var err error
+		s3c, err = storage.NewS3Client(s3cfg.AccessKey, s3cfg.SecretKey, s3cfg.Bucket)
+		if err != nil {
+			log.Printf("S3 client init failed, falling back to chunked mode: %v", err)
+		} else {
+			log.Println("S3 client initialized — async SpeechKit API enabled for long audio")
+		}
+	}
+
 	return &Worker{
 		db:           db,
 		speechKit:    speechkit.NewClient(apiKey, folderId),
+		mlClient:     ml,
+		s3Client:     s3c,
 		uploadDir:    uploadDir,
 		pollInterval: 2 * time.Second,
 	}
@@ -88,7 +123,8 @@ func (w *Worker) processBatch() error {
 }
 
 func (w *Worker) processTask(task TaskRow) error {
-	now := time.Now().UTC()
+	startTime := time.Now()
+	now := startTime.UTC()
 	res, err := w.db.Exec(
 		`UPDATE transcription_tasks
 		 SET status = 'в процессе', started_at = ?
@@ -120,12 +156,13 @@ func (w *Worker) processTask(task TaskRow) error {
 	}
 	defer os.Remove(oggPath)
 
+	// Шаг 1: Транскрибация через SpeechKit
 	var text string
 	if duration <= maxSyncDuration {
-		// Короткое аудио — один запрос
 		text, err = w.speechKit.RecognizeFile(oggPath, "ru-RU")
+	} else if w.s3Client != nil {
+		text, err = w.recognizeLongAudioAsync(task.ID, oggPath)
 	} else {
-		// Длинное аудио — разбиваем на части
 		text, err = w.recognizeLongAudio(task.ID, oggPath)
 	}
 
@@ -133,13 +170,151 @@ func (w *Worker) processTask(task TaskRow) error {
 		return w.failTask(task.ID, "Ошибка распознавания: "+err.Error())
 	}
 
+	// Шаг 2: Диаризация через ML-сервис (если доступен)
+	if w.mlClient != nil {
+		w.diarizeAndSaveSegments(task.ID, oggPath, text)
+	}
+
+	processingTime := int(time.Since(startTime).Seconds())
+
 	_, err = w.db.Exec(
 		`UPDATE transcription_tasks
-		 SET status = 'готово', transcript_text = ?, provider = 'yandex_speechkit', completed_at = ?
+		 SET status = 'готово', transcript_text = ?, provider = 'yandex_speechkit',
+		     processing_time = ?, completed_at = ?
 		 WHERE id = ?`,
-		text, time.Now().UTC(), task.ID,
+		text, processingTime, time.Now().UTC(), task.ID,
 	)
 	return err
+}
+
+// diarizeAndSaveSegments выполняет диаризацию и сохраняет сегменты.
+func (w *Worker) diarizeAndSaveSegments(taskID, audioPath, transcriptText string) {
+	log.Printf("task %s: starting diarization", taskID)
+
+	diarization, err := w.mlClient.Diarize(audioPath)
+	if err != nil {
+		log.Printf("task %s: diarization failed (non-fatal): %v", taskID, err)
+		// Сохраняем весь текст как один сегмент без спикера
+		w.saveSingleSegment(taskID, transcriptText)
+		return
+	}
+
+	log.Printf("task %s: diarization found %d speakers, %d segments",
+		taskID, diarization.NumSpeakers, len(diarization.Segments))
+
+	// Сохраняем данные о спикерах
+	speakerJSON, _ := json.Marshal(diarization)
+	w.db.Exec(
+		`UPDATE transcription_tasks SET speaker_data = ? WHERE id = ?`,
+		string(speakerJSON), taskID,
+	)
+
+	// Обработка текста через ML-сервис (определение паразитов)
+	var textProcessed *mlclient.TextProcessResponse
+	if w.mlClient != nil {
+		textProcessed, err = w.mlClient.ProcessText(transcriptText, true, false)
+		if err != nil {
+			log.Printf("task %s: text processing failed (non-fatal): %v", taskID, err)
+		}
+	}
+
+	// Создаём сегменты на основе диаризации
+	now := time.Now().UTC()
+	for _, seg := range diarization.Segments {
+		segID := uuid.New().String()
+		startMs := int(seg.Start * 1000)
+		endMs := int(seg.End * 1000)
+
+		// Определяем текст для сегмента (упрощённая логика — весь текст)
+		segText := extractTextForTimeRange(transcriptText, len(diarization.Segments))
+
+		// Определяем наличие паразитов
+		hasFillers := false
+		if textProcessed != nil && len(textProcessed.Segments) > 0 {
+			hasFillers = textProcessed.Segments[0].HasFillers
+		}
+
+		w.db.Exec(
+			`INSERT INTO transcription_segments
+			 (id, task_id, speaker_id, start_time, end_time, text, has_fillers, created_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+			segID, taskID, seg.Speaker, startMs, endMs, segText, hasFillers, now,
+		)
+	}
+}
+
+// saveSingleSegment сохраняет весь текст как один сегмент (fallback без диаризации).
+func (w *Worker) saveSingleSegment(taskID, text string) {
+	now := time.Now().UTC()
+	segID := uuid.New().String()
+
+	// Проверяем паразиты через ML-сервис
+	hasFillers := false
+	if w.mlClient != nil {
+		resp, err := w.mlClient.ProcessText(text, true, false)
+		if err == nil && resp.TotalFillers > 0 {
+			hasFillers = true
+		}
+	}
+
+	w.db.Exec(
+		`INSERT INTO transcription_segments
+		 (id, task_id, start_time, end_time, text, has_fillers, created_at)
+		 VALUES (?, ?, 0, 0, ?, ?, ?)`,
+		segID, taskID, text, hasFillers, now,
+	)
+}
+
+// extractTextForTimeRange — упрощённая логика разбиения текста по сегментам.
+// В реальной системе нужно использовать word-level timestamps от SpeechKit.
+func extractTextForTimeRange(fullText string, numSegments int) string {
+	if numSegments <= 1 {
+		return fullText
+	}
+	words := strings.Fields(fullText)
+	if len(words) == 0 {
+		return ""
+	}
+	// Равномерно распределяем слова по сегментам
+	wordsPerSegment := len(words) / numSegments
+	if wordsPerSegment < 1 {
+		wordsPerSegment = 1
+	}
+	// Возвращаем первую порцию (каждый вызов получит одинаковый текст — это упрощение)
+	end := wordsPerSegment
+	if end > len(words) {
+		end = len(words)
+	}
+	return strings.Join(words[:end], " ")
+}
+
+// recognizeLongAudioAsync загружает файл в S3 и использует async SpeechKit API.
+func (w *Worker) recognizeLongAudioAsync(taskID, oggPath string) (string, error) {
+	log.Printf("task %s: uploading to S3 for async recognition", taskID)
+
+	key := storage.GenerateKey("audio", fmt.Sprintf("%s_%s", taskID, filepath.Base(oggPath)))
+	ctx := context.Background()
+
+	s3URI, err := w.s3Client.Upload(ctx, oggPath, key)
+	if err != nil {
+		return "", fmt.Errorf("S3 upload failed: %w", err)
+	}
+
+	// Удаляем из S3 после распознавания
+	defer func() {
+		if delErr := w.s3Client.Delete(ctx, key); delErr != nil {
+			log.Printf("task %s: failed to delete S3 object: %v", taskID, delErr)
+		}
+	}()
+
+	log.Printf("task %s: starting async recognition (URI: %s)", taskID, s3URI)
+
+	text, err := w.speechKit.RecognizeLongAudio(s3URI, "ru-RU")
+	if err != nil {
+		return "", fmt.Errorf("async recognition failed: %w", err)
+	}
+
+	return text, nil
 }
 
 func (w *Worker) recognizeLongAudio(taskID, inputPath string) (string, error) {

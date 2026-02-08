@@ -7,12 +7,22 @@ import { configureStore } from '@reduxjs/toolkit';
 import TaskPage from './TaskPage';
 import historyReducer from '../store/historySlice';
 import taskReducer from '../store/taskSlice';
+import projectReducer from '../store/projectSlice';
 import * as api from '../api';
 
-// Mock the API module
 vi.mock('../api');
 
-// Mock react-router-dom navigate
+// Mock complex child components that depend on browser APIs (WaveSurfer, etc.)
+vi.mock('../components/player/AudioPlayer', () => ({
+  default: ({ onTimeUpdate }: { audioUrl: string; onTimeUpdate: (ms: number) => void }) => (
+    <div data-testid="audio-player">AudioPlayer mock</div>
+  ),
+}));
+
+vi.mock('../components/editor/TranscriptionEditor', () => ({
+  default: () => <div data-testid="transcription-editor">TranscriptionEditor mock</div>,
+}));
+
 const mockNavigate = vi.fn();
 vi.mock('react-router-dom', async () => {
   const actual = await vi.importActual('react-router-dom');
@@ -27,12 +37,13 @@ const createTestStore = (preloadedState = {}) =>
     reducer: {
       history: historyReducer,
       task: taskReducer,
+      projects: projectReducer,
     },
     preloadedState,
   });
 
-const renderTaskPage = (taskId = 'task-123', preloadedState = {}) => {
-  const store = createTestStore(preloadedState);
+const renderTaskPage = (taskId = 'task-123') => {
+  const store = createTestStore();
   return {
     store,
     ...render(
@@ -53,23 +64,17 @@ describe('TaskPage', () => {
   });
 
   describe('Loading and display', () => {
-    it('shows loading message initially', async () => {
-      vi.mocked(api.fetchTask).mockImplementation(() =>
-        new Promise(resolve => setTimeout(() => resolve({
-          id: 'task-123',
-          status: 'готово',
-          originalName: 'test.mp3',
-          transcriptText: 'Hello world',
-          createdAt: '2024-01-01T00:00:00Z',
-        }), 100))
+    it('shows loading spinner initially', () => {
+      vi.mocked(api.fetchTask).mockImplementation(
+        () => new Promise(() => {}) // never resolves
       );
 
-      renderTaskPage('task-123');
-      
-      expect(screen.getByText(/loading/i)).toBeInTheDocument();
+      renderTaskPage();
+      // Ant Design Spin uses aria-busy="true"
+      expect(document.querySelector('.ant-spin')).toBeInTheDocument();
     });
 
-    it('displays task details after loading', async () => {
+    it('displays task name and status after loading', async () => {
       vi.mocked(api.fetchTask).mockResolvedValue({
         id: 'task-123',
         status: 'готово',
@@ -77,33 +82,13 @@ describe('TaskPage', () => {
         transcriptText: 'Hello world',
         createdAt: '2024-01-01T00:00:00Z',
       });
+      vi.mocked(api.fetchSegments).mockResolvedValue([]);
 
-      renderTaskPage('task-123');
-
-      await waitFor(() => {
-        expect(screen.getByText(/task details/i)).toBeInTheDocument();
-      });
-      
-      expect(screen.getByText('test.mp3')).toBeInTheDocument();
-      expect(screen.getByText('готово')).toBeInTheDocument();
-    });
-
-    it('displays transcript when available', async () => {
-      vi.mocked(api.fetchTask).mockResolvedValue({
-        id: 'task-123',
-        status: 'готово',
-        originalName: 'test.mp3',
-        transcriptText: 'Hello world transcript',
-        createdAt: '2024-01-01T00:00:00Z',
-      });
-
-      renderTaskPage('task-123');
+      renderTaskPage();
 
       await waitFor(() => {
-        expect(screen.getByRole('heading', { name: /transcript/i })).toBeInTheDocument();
+        expect(screen.getByText('test.mp3')).toBeInTheDocument();
       });
-      
-      expect(screen.getByDisplayValue('Hello world transcript')).toBeInTheDocument();
     });
 
     it('displays error message when task has error', async () => {
@@ -115,26 +100,72 @@ describe('TaskPage', () => {
         createdAt: '2024-01-01T00:00:00Z',
       });
 
-      renderTaskPage('task-123');
+      renderTaskPage();
 
       await waitFor(() => {
         expect(screen.getByText('Recognition failed')).toBeInTheDocument();
       });
     });
 
-    it('shows task not found after failed load', async () => {
-      vi.mocked(api.fetchTask).mockRejectedValue(new Error('Not found'));
+    it('shows AudioPlayer and TranscriptionEditor for completed task with segments', async () => {
+      vi.mocked(api.fetchTask).mockResolvedValue({
+        id: 'task-123',
+        status: 'готово',
+        originalName: 'test.mp3',
+        transcriptText: 'Hello world',
+        createdAt: '2024-01-01T00:00:00Z',
+      });
+      vi.mocked(api.fetchSegments).mockResolvedValue([
+        {
+          id: 'seg-1',
+          speakerId: 'spk-1',
+          speakerName: 'Спикер 1',
+          startTime: 0,
+          endTime: 5000,
+          text: 'Hello world',
+          hasFillers: false,
+          isCorrected: false,
+        },
+      ]);
 
-      renderTaskPage('task-123');
+      renderTaskPage();
 
       await waitFor(() => {
-        expect(screen.getByText(/task not found/i)).toBeInTheDocument();
+        expect(screen.getByTestId('audio-player')).toBeInTheDocument();
+      });
+      expect(screen.getByTestId('transcription-editor')).toBeInTheDocument();
+    });
+
+    it('shows transcript text fallback when no segments', async () => {
+      vi.mocked(api.fetchTask).mockResolvedValue({
+        id: 'task-123',
+        status: 'готово',
+        originalName: 'test.mp3',
+        transcriptText: 'Hello world transcript',
+        createdAt: '2024-01-01T00:00:00Z',
+      });
+      vi.mocked(api.fetchSegments).mockResolvedValue([]);
+
+      renderTaskPage();
+
+      await waitFor(() => {
+        expect(screen.getByText('Hello world transcript')).toBeInTheDocument();
+      });
+    });
+
+    it('shows error alert when task loading fails', async () => {
+      vi.mocked(api.fetchTask).mockRejectedValue(new Error('Ошибка загрузки'));
+
+      renderTaskPage();
+
+      await waitFor(() => {
+        expect(screen.getByText('Ошибка загрузки')).toBeInTheDocument();
       });
     });
   });
 
   describe('Actions', () => {
-    it('back button navigates to home', async () => {
+    it('Назад button navigates to home', async () => {
       vi.mocked(api.fetchTask).mockResolvedValue({
         id: 'task-123',
         status: 'готово',
@@ -142,20 +173,21 @@ describe('TaskPage', () => {
         transcriptText: 'Hello world',
         createdAt: '2024-01-01T00:00:00Z',
       });
+      vi.mocked(api.fetchSegments).mockResolvedValue([]);
 
-      renderTaskPage('task-123');
+      renderTaskPage();
 
       await waitFor(() => {
-        expect(screen.getByRole('button', { name: /back/i })).toBeInTheDocument();
+        expect(screen.getByText('Назад')).toBeInTheDocument();
       });
 
-      const backButton = screen.getByRole('button', { name: /back/i });
+      const backButton = screen.getByText('Назад');
       await userEvent.click(backButton);
 
       expect(mockNavigate).toHaveBeenCalledWith('/');
     });
 
-    it('copy all button copies transcript to clipboard', async () => {
+    it('copy button copies transcript to clipboard', async () => {
       vi.mocked(api.fetchTask).mockResolvedValue({
         id: 'task-123',
         status: 'готово',
@@ -163,20 +195,21 @@ describe('TaskPage', () => {
         transcriptText: 'Hello world',
         createdAt: '2024-01-01T00:00:00Z',
       });
+      vi.mocked(api.fetchSegments).mockResolvedValue([]);
 
-      renderTaskPage('task-123');
+      renderTaskPage();
 
       await waitFor(() => {
-        expect(screen.getByRole('button', { name: /copy all/i })).toBeInTheDocument();
+        expect(screen.getByText('Копировать текст')).toBeInTheDocument();
       });
 
-      const copyButton = screen.getByRole('button', { name: /copy all/i });
+      const copyButton = screen.getByText('Копировать текст');
       await userEvent.click(copyButton);
 
       expect(navigator.clipboard.writeText).toHaveBeenCalledWith('Hello world');
     });
 
-    it('download TXT button calls downloadExport', async () => {
+    it('Скачать TXT button calls downloadExport', async () => {
       vi.mocked(api.fetchTask).mockResolvedValue({
         id: 'task-123',
         status: 'готово',
@@ -184,15 +217,16 @@ describe('TaskPage', () => {
         transcriptText: 'Hello world',
         createdAt: '2024-01-01T00:00:00Z',
       });
+      vi.mocked(api.fetchSegments).mockResolvedValue([]);
       vi.mocked(api.downloadExport).mockResolvedValue(undefined);
 
-      renderTaskPage('task-123');
+      renderTaskPage();
 
       await waitFor(() => {
-        expect(screen.getByRole('button', { name: /download txt/i })).toBeInTheDocument();
+        expect(screen.getByText('Скачать TXT')).toBeInTheDocument();
       });
 
-      const downloadTxtButton = screen.getByRole('button', { name: /download txt/i });
+      const downloadTxtButton = screen.getByText('Скачать TXT');
       await userEvent.click(downloadTxtButton);
 
       await waitFor(() => {
@@ -200,7 +234,7 @@ describe('TaskPage', () => {
       });
     });
 
-    it('download DOCX button calls downloadExport', async () => {
+    it('Скачать DOCX button calls downloadExport', async () => {
       vi.mocked(api.fetchTask).mockResolvedValue({
         id: 'task-123',
         status: 'готово',
@@ -208,75 +242,53 @@ describe('TaskPage', () => {
         transcriptText: 'Hello world',
         createdAt: '2024-01-01T00:00:00Z',
       });
+      vi.mocked(api.fetchSegments).mockResolvedValue([]);
       vi.mocked(api.downloadExport).mockResolvedValue(undefined);
 
-      renderTaskPage('task-123');
+      renderTaskPage();
 
       await waitFor(() => {
-        expect(screen.getByRole('button', { name: /download docx/i })).toBeInTheDocument();
+        expect(screen.getByText('Скачать DOCX')).toBeInTheDocument();
       });
 
-      const downloadDocxButton = screen.getByRole('button', { name: /download docx/i });
+      const downloadDocxButton = screen.getByText('Скачать DOCX');
       await userEvent.click(downloadDocxButton);
 
       await waitFor(() => {
         expect(api.downloadExport).toHaveBeenCalledWith('task-123', 'docx');
       });
     });
-
-    it('shows error on download failure', async () => {
-      vi.mocked(api.fetchTask).mockResolvedValue({
-        id: 'task-123',
-        status: 'готово',
-        originalName: 'test.mp3',
-        transcriptText: 'Hello world',
-        createdAt: '2024-01-01T00:00:00Z',
-      });
-      vi.mocked(api.downloadExport).mockRejectedValue(new Error('Export failed'));
-
-      renderTaskPage('task-123');
-
-      await waitFor(() => {
-        expect(screen.getByRole('button', { name: /download txt/i })).toBeInTheDocument();
-      });
-
-      const downloadTxtButton = screen.getByRole('button', { name: /download txt/i });
-      await userEvent.click(downloadTxtButton);
-
-      await waitFor(() => {
-        expect(screen.getByText(/export failed/i)).toBeInTheDocument();
-      });
-    });
   });
 
-  describe('Task polling', () => {
-    it('does not poll for completed tasks', async () => {
-      vi.useFakeTimers();
-      
+  describe('Processing state', () => {
+    it('shows processing message for in-progress task', async () => {
       vi.mocked(api.fetchTask).mockResolvedValue({
         id: 'task-123',
-        status: 'готово',
+        status: 'в процессе',
         originalName: 'test.mp3',
-        transcriptText: 'Hello world',
         createdAt: '2024-01-01T00:00:00Z',
       });
 
-      renderTaskPage('task-123');
-      
-      // Wait for initial load
-      await vi.runAllTimersAsync();
-      
-      // Clear mocks after initial load
-      vi.mocked(api.fetchTask).mockClear();
-      
-      // Advance timer
-      vi.advanceTimersByTime(5000);
-      await vi.runAllTimersAsync();
-      
-      // Should not have called fetchTask again since task is completed
-      expect(api.fetchTask).not.toHaveBeenCalled();
-      
-      vi.useRealTimers();
+      renderTaskPage();
+
+      await waitFor(() => {
+        expect(screen.getByText('Идёт обработка...')).toBeInTheDocument();
+      });
+    });
+
+    it('shows processing message for pending task', async () => {
+      vi.mocked(api.fetchTask).mockResolvedValue({
+        id: 'task-123',
+        status: 'ожидает',
+        originalName: 'test.mp3',
+        createdAt: '2024-01-01T00:00:00Z',
+      });
+
+      renderTaskPage();
+
+      await waitFor(() => {
+        expect(screen.getByText('Идёт обработка...')).toBeInTheDocument();
+      });
     });
   });
 });

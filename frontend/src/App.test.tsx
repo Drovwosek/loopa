@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import { Provider } from 'react-redux';
 import { MemoryRouter } from 'react-router-dom';
@@ -6,17 +6,24 @@ import { configureStore } from '@reduxjs/toolkit';
 import App from './App';
 import historyReducer from './store/historySlice';
 import taskReducer from './store/taskSlice';
+import projectReducer from './store/projectSlice';
+import * as api from './api';
+
+vi.mock('./api');
 
 const createTestStore = (preloadedState = {}) =>
   configureStore({
     reducer: {
       history: historyReducer,
       task: taskReducer,
+      projects: projectReducer,
     },
     preloadedState,
   });
 
 const renderApp = (initialEntries = ['/'], preloadedState = {}) => {
+  vi.mocked(api.fetchHistory).mockResolvedValue([]);
+  vi.mocked(api.fetchProjects).mockResolvedValue([]);
   const store = createTestStore(preloadedState);
   return render(
     <Provider store={store}>
@@ -28,41 +35,26 @@ const renderApp = (initialEntries = ['/'], preloadedState = {}) => {
 };
 
 describe('App', () => {
-  it('renders the header with Loopa title', () => {
+  it('renders the Loopa title in sidebar', () => {
     renderApp();
-    expect(screen.getByRole('heading', { name: /loopa/i })).toBeInTheDocument();
+    expect(screen.getByText('Loopa')).toBeInTheDocument();
+  });
+
+  it('renders menu items', () => {
+    renderApp();
+    expect(screen.getByText('Транскрибация')).toBeInTheDocument();
+    expect(screen.getByText('Проекты')).toBeInTheDocument();
   });
 
   it('renders HomePage at root route', () => {
     renderApp(['/']);
-    expect(screen.getByText(/upload media/i)).toBeInTheDocument();
+    expect(screen.getByText('Загрузка медиафайла')).toBeInTheDocument();
   });
 
-  it('renders TaskPage at /tasks/:id route', () => {
-    const preloadedState = {
-      task: {
-        loading: false,
-        current: {
-          id: 'task-123',
-          status: 'готово',
-          originalName: 'test.mp3',
-          transcriptText: 'Hello world',
-          createdAt: '2024-01-01T00:00:00Z',
-        },
-      },
-      history: {
-        items: [],
-        loading: false,
-      },
-    };
-
-    renderApp(['/tasks/task-123'], preloadedState);
-    expect(screen.getByText(/task details/i)).toBeInTheDocument();
-  });
-
-  it('header link navigates to home', () => {
-    renderApp();
-    const headerLink = screen.getByRole('link', { name: /loopa/i });
-    expect(headerLink).toHaveAttribute('href', '/');
+  it('renders ProjectPage at /projects route', () => {
+    vi.mocked(api.fetchProjects).mockResolvedValue([]);
+    renderApp(['/projects']);
+    // Title "Проекты" in PageHeader (h4)
+    expect(screen.getByRole('heading', { name: 'Проекты' })).toBeInTheDocument();
   });
 });

@@ -41,6 +41,7 @@ services:
       UPLOAD_DIR: /data/uploads
       YANDEX_SPEECHKIT_API_KEY: ${YANDEX_SPEECHKIT_API_KEY}
       YANDEX_FOLDER_ID: ${YANDEX_FOLDER_ID}
+      ML_SERVICE_URL: http://ml-service:8001
       # Опционально: для аудио длиннее 30 сек
       YANDEX_STORAGE_ACCESS_KEY: ${YANDEX_STORAGE_ACCESS_KEY:-}
       YANDEX_STORAGE_SECRET_KEY: ${YANDEX_STORAGE_SECRET_KEY:-}
@@ -48,21 +49,37 @@ services:
     depends_on:
       mysql:
         condition: service_healthy
+      ml-service:
+        condition: service_started
     volumes:
       - upload_data:/data/uploads
+    restart: on-failure
+
+  ml-service:
+    build:
+      context: ../ml-service
+      dockerfile: Dockerfile
+    environment:
+      HF_TOKEN: ${HF_TOKEN:-}
+      DEVICE: cpu
+    ports:
+      - "8001:8001"
+    volumes:
+      - model_cache:/root/.cache
     restart: on-failure
 
   frontend:
     build:
       context: ../frontend
       dockerfile: Dockerfile
-    environment:
-      VITE_API_URL: http://localhost:8080/api
+      args:
+        VITE_API_URL: http://localhost:8080/api
     ports:
-      - "5173:5173"
+      - "3000:80"
     depends_on:
       - api
 
 volumes:
   mysql_data:
   upload_data:
+  model_cache:
