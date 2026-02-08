@@ -1,6 +1,5 @@
 import { useEffect, useState } from "react";
 import {
-  Card,
   Table,
   Button,
   Space,
@@ -9,6 +8,8 @@ import {
   Empty,
   Popconfirm,
   Typography,
+  Flex,
+  message,
 } from "antd";
 import { PlusOutlined, DeleteOutlined, FolderOutlined } from "@ant-design/icons";
 import { useNavigate } from "react-router-dom";
@@ -33,10 +34,14 @@ export default function ProjectPage() {
 
   const handleCreate = async () => {
     if (!name.trim()) return;
-    await dispatch(addProject({ name: name.trim(), description: description.trim() || undefined }));
-    setModalOpen(false);
-    setName("");
-    setDescription("");
+    const result = await dispatch(addProject({ name: name.trim(), description: description.trim() || undefined }));
+    if (addProject.fulfilled.match(result)) {
+      setModalOpen(false);
+      setName("");
+      setDescription("");
+    } else {
+      message.error("Не удалось создать проект");
+    }
   };
 
   const columns = [
@@ -122,7 +127,7 @@ export default function ProjectPage() {
         cancelText="Отмена"
         okButtonProps={{ disabled: !name.trim() }}
       >
-        <Space orientation="vertical" style={{ width: "100%" }} size={12}>
+        <Flex vertical gap={12}>
           <Input
             placeholder="Название проекта"
             value={name}
@@ -136,7 +141,7 @@ export default function ProjectPage() {
             onChange={(e) => setDescription(e.target.value)}
             rows={3}
           />
-        </Space>
+        </Flex>
       </Modal>
     </div>
   );

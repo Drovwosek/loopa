@@ -49,8 +49,17 @@ const projectSlice = createSlice({
       state.loading = false;
       state.error = action.error.message ?? "Failed to load projects";
     });
+    builder.addCase(addProject.pending, (state) => {
+      state.loading = true;
+      state.error = undefined;
+    });
     builder.addCase(addProject.fulfilled, (state, action) => {
+      state.loading = false;
       state.items.unshift(action.payload);
+    });
+    builder.addCase(addProject.rejected, (state, action) => {
+      state.loading = false;
+      state.error = action.error.message ?? "Не удалось создать проект";
     });
     builder.addCase(removeProject.fulfilled, (state, action) => {
       state.items = state.items.filter((p) => p.id !== action.payload);
